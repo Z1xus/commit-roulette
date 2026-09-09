@@ -1,0 +1,7 @@
+hash kernels
+
+public domain sha intrinsics by jeffrey walton, based on intel and arm examples.
+source: https://github.com/noloader/SHA-Intrinsics
+commit: d03795497f3e4576083fc2cd8fe0b924f24d0bb2
+
+only the block functions are included

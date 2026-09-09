@@ -1,0 +1,82 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-linux-musl
+            name: linux-x86_64
+          - target: aarch64-linux-musl
+            name: linux-arm64
+          - target: x86_64-macos
+            name: macos-x86_64
+          - target: aarch64-macos
+            name: macos-arm64
+          - target: x86_64-windows-gnu
+            name: windows-x86_64
+          - target: aarch64-windows-gnu
+            name: windows-arm64
+    env:
+      TARGET: ${{ matrix.target }}
+      NAME: groll-${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+          cache-key: ${{ matrix.target }}
+      - name: build
+        run: zig build -Dtarget="$TARGET" -Doptimize=ReleaseFast -j2
+      - name: package
+        run: |
+          mkdir -p dist
+          stage=$(mktemp -d)
+          trap 'rm -rf "$stage"' EXIT
+          cp readme.md "$stage/"
+          cp vendor/sha/notice "$stage/sha-notice.txt"
+          if [[ "$TARGET" == *windows* ]]; then
+            cp zig-out/bin/groll.exe "$stage/groll.exe"
+            zip -j "dist/$NAME.zip" "$stage/groll.exe" "$stage/readme.md" "$stage/sha-notice.txt"
+          else
+            cp zig-out/bin/groll "$stage/groll"
+            tar -czf "dist/$NAME.tar.gz" -C "$stage" groll readme.md sha-notice.txt
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: groll-${{ matrix.name }}
+          path: dist/*
+          compression-level: 0
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: groll-*
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        run: cd dist && sha256sum groll-*.tar.gz groll-*.zip > sha256sums.txt
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$RELEASE_TAG" dist/*.tar.gz dist/*.zip dist/sha256sums.txt --repo "$GITHUB_REPOSITORY" --title "groll ${RELEASE_TAG#v}" --generate-notes

@@ -1,0 +1,7 @@
+.{
+    .name = .commit_roulette,
+    .fingerprint = 0x650681db766ed533,
+    .version = "1.0.0",
+    .minimum_zig_version = "0.16.0",
+    .paths = .{ "build.zig", "build.zig.zon", "src", "vendor", "readme.md" },
+}
