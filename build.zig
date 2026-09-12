@@ -9,8 +9,8 @@ pub fn build(b: *std.Build) void {
     const run = b.addRunArtifact(exe);
     if (b.args) |args| run.addArgs(args);
     b.step("run", "run groll").dependOn(&run.step);
-    const release = b.step("release", "cross-build all six release targets");
-    const targets = [_][]const u8{ "x86_64-linux-musl", "aarch64-linux-musl", "x86_64-macos", "aarch64-macos", "x86_64-windows-gnu", "aarch64-windows-gnu" };
+    const release = b.step("release", "cross-build all eight release targets");
+    const targets = [_][]const u8{ "x86_64-linux-gnu.2.28", "aarch64-linux-gnu.2.28", "x86_64-linux-musl", "aarch64-linux-musl", "x86_64-macos", "aarch64-macos", "x86_64-windows-gnu", "aarch64-windows-gnu" };
     for (targets) |triple| {
         const resolved = b.resolveTargetQuery(std.Target.Query.parse(.{ .arch_os_abi = triple, .cpu_features = "baseline" }) catch unreachable);
         const artifact = executable(b, resolved, .ReleaseFast);
@@ -25,6 +25,8 @@ fn executable(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     options.addOption([]const u8, "version", manifest.version);
     module.addOptions("build_options", options);
     module.addCSourceFile(.{ .file = b.path("src/platform.c"), .flags = &.{ "-std=c11", "-O3" } });
+    module.addCSourceFile(.{ .file = b.path("src/gpu.c"), .flags = &.{ "-std=c11", "-O3" } });
+    if (target.result.os.tag == .linux) module.linkSystemLibrary("dl", .{});
     switch (target.result.cpu.arch) {
         .x86_64 => module.addCSourceFile(.{ .file = b.path("src/hash-x86.c"), .flags = &.{"-O3"} }),
         .aarch64 => module.addCSourceFile(.{ .file = b.path("src/hash-arm.c"), .flags = &.{"-O3"} }),

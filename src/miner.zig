@@ -1,10 +1,12 @@
 const std = @import("std");
 const hash = @import("hash.zig");
+const gpu = @import("gpu.zig");
 const ui = @import("ui.zig").ui;
 extern fn roulette_stopped() c_int;
 extern fn roulette_signals() void;
 
 pub const position = enum { prefix, suffix, contains };
+pub const device = enum { auto, cpu, gpu };
 pub const pattern = struct {
     digits: [64]u8 = undefined,
     len: usize,
@@ -94,7 +96,71 @@ pub fn encode(bytes: []u8, value: u64, signed: bool) void {
     }
 }
 
-pub fn mine(allocator: std.mem.Allocator, io: std.Io, display: *ui, raw: []const u8, offset: usize, signed: bool, kind: hash.algorithm, target: pattern, threads: usize, engine: hash.backend) !result {
+pub fn mine(allocator: std.mem.Allocator, io: std.Io, display: *ui, raw: []const u8, offset: usize, signed: bool, kind: hash.algorithm, target: pattern, threads: usize, engine: hash.backend, selected: device) !result {
+    if (selected != .cpu) {
+        return mineGpu(allocator, io, display, raw, offset, signed, kind, target, engine) catch |err| {
+            if (selected == .gpu or (err != error.GpuUnavailable and err != error.GpuFailed)) return err;
+            display.log("*", "gpu unavailable or failed. using cpu workers.", .{});
+            return mineCpu(allocator, io, display, raw, offset, signed, kind, target, threads, engine);
+        };
+    }
+    return mineCpu(allocator, io, display, raw, offset, signed, kind, target, threads, engine);
+}
+
+fn mineGpu(allocator: std.mem.Allocator, io: std.Io, display: *ui, raw: []const u8, offset: usize, signed: bool, kind: hash.algorithm, target: pattern, engine: hash.backend) !result {
+    roulette_signals();
+    defer display.clear();
+    var base = hash.context.init(kind, engine);
+    var header: [40]u8 = undefined;
+    base.update(try std.fmt.bufPrint(&header, "commit {d}\x00", .{raw.len}));
+    base.update(raw[0..offset]);
+    display.log("*", "starting opencl gpu  |  ctrl-c to stop", .{});
+    const session = gpu.session.init(allocator, base, raw[offset..], signed, target.digits[0..target.len], @intCast(@intFromEnum(target.where))) catch |err| {
+        if (roulette_stopped() != 0) return error.Canceled;
+        return err;
+    };
+    defer session.deinit();
+    const winner = try allocator.dupe(u8, raw);
+    errdefer allocator.free(winner);
+    const begin = std.Io.Clock.awake.now(io);
+    var start: u64 = 0;
+    var tries: u64 = 0;
+    var batch_size: u32 = 4096;
+    var last_frame: f64 = -1;
+    while (true) {
+        if (roulette_stopped() != 0) return error.Canceled;
+        const count: u32 = @intCast(@min(@as(u64, batch_size), std.math.maxInt(u64) - start));
+        const actual = @max(count, 1);
+        const batch_begin = std.Io.Clock.awake.now(io);
+        const found = session.batch(start, actual) catch |err| {
+            if (roulette_stopped() != 0) return error.Canceled;
+            return err;
+        };
+        tries +|= actual;
+        if (roulette_stopped() != 0) return error.Canceled;
+        const elapsed = @as(f64, @floatFromInt(begin.untilNow(io, .awake).toNanoseconds())) / 1e9;
+        if (found) |counter| {
+            encode(winner[offset..], counter, signed);
+            var check = base;
+            check.update(winner[offset..]);
+            const digest = check.final();
+            if (!target.matches(digest[0..if (kind == .sha1) @as(usize, 20) else 32])) return error.GpuFailed;
+            return .{ .bytes = winner, .tries = tries, .seconds = elapsed, .engine = engine };
+        }
+        if (elapsed - last_frame >= 0.1) {
+            display.progress(tries, elapsed, tries, target.len);
+            last_frame = elapsed;
+        }
+        if (count == 0) return error.SearchExhausted;
+        start += actual;
+        const duration = batch_begin.untilNow(io, .awake).toNanoseconds();
+        if (duration < 25_000_000) batch_size = @min(batch_size * 2, 1_048_576);
+        if (duration > 100_000_000) batch_size = @max(batch_size / 2, 256);
+    }
+}
+
+fn mineCpu(allocator: std.mem.Allocator, io: std.Io, display: *ui, raw: []const u8, offset: usize, signed: bool, kind: hash.algorithm, target: pattern, threads: usize, engine: hash.backend) !result {
+    display.log("*", "{d} workers  |  {s} cpu  |  ctrl-c to stop", .{ threads, @tagName(engine) });
     var base = hash.context.init(kind, engine);
     var header: [40]u8 = undefined;
     base.update(try std.fmt.bufPrint(&header, "commit {d}\x00", .{raw.len}));

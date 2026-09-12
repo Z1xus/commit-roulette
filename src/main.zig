@@ -16,6 +16,7 @@ const help =
     \\  --suffix / --contains     match end / anywhere, default: prefix
     \\  --sign / --no-sign        enable / disable signing
     \\  --threads <n>             worker count, default: all cpus
+    \\  --gpu / --cpu             require gpu / use cpu, default: auto
     \\  --no-animation / --quiet  plain logs / hash only
     \\  --help / --version
     \\
@@ -27,6 +28,7 @@ const options = struct {
     message: ?[]const u8 = null,
     sign: ?bool = null,
     threads: usize = 0,
+    device: miner.device = .auto,
     quiet: bool = false,
     no_animation: bool = false,
     help: bool = false,
@@ -43,7 +45,9 @@ pub fn main(init: std.process.Init) void {
             error.InvalidTarget => "use a hexadecimal target, such as beef or cafe.",
             error.InvalidTargetLength => "target length must fit the repository hash: 1-40 digits for sha-1, 1-64 for sha-256.",
             error.InvalidThreads => "use --threads with a whole number from 1 to 4096.",
-            error.ConflictingOptions => "choose one match position and one signing option.",
+            error.ConflictingOptions => "choose one match position, one signing option, and one device option.",
+            error.GpuUnavailable => "no usable opencl gpu. check your gpu driver or use --cpu.",
+            error.GpuFailed => "gpu mining failed. no winner was applied. try --cpu.",
             error.MissingValue => "an option needs a value. run groll --help.",
             error.InvalidArguments => "unknown command or option. run groll --help.",
             error.UnfinishedGitOperation => "finish or abort the current merge, rebase, or cherry-pick before rolling.",
@@ -85,6 +89,11 @@ fn parse(args: []const [:0]const u8) !options {
         }
         if (std.mem.eql(u8, a, "--version")) {
             opt.version = true;
+            continue;
+        }
+        if (std.mem.eql(u8, a, "--gpu") or std.mem.eql(u8, a, "--cpu")) {
+            if (opt.device != .auto) return error.ConflictingOptions;
+            opt.device = if (std.mem.eql(u8, a, "--gpu")) .gpu else .cpu;
             continue;
         }
         if (std.mem.eql(u8, a, "--quiet")) {
@@ -130,7 +139,7 @@ fn parse(args: []const [:0]const u8) !options {
     }
     if (opt.help or opt.version) return opt;
     if (opt.action.len > 0 and !std.mem.eql(u8, opt.action, "roll") and !std.mem.eql(u8, opt.action, "commit") and !std.mem.eql(u8, opt.action, "undo")) return error.InvalidArguments;
-    if (std.mem.eql(u8, opt.action, "undo") and (opt.target.len > 0 or opt.sign != null or opt.message != null or match_set or opt.threads != 0)) return error.InvalidArguments;
+    if (std.mem.eql(u8, opt.action, "undo") and (opt.target.len > 0 or opt.sign != null or opt.message != null or match_set or opt.threads != 0 or opt.device != .auto)) return error.InvalidArguments;
     if (!std.mem.eql(u8, opt.action, "commit") and opt.message != null) return error.InvalidArguments;
     return opt;
 }
@@ -218,9 +227,8 @@ fn execute(init: std.process.Init, display: *ui) !void {
     const target = try std.ascii.allocLowerString(allocator, opt.target);
     const engine = if (init.environ_map.get("ROULETTE_HASH_BACKEND")) |value| if (std.mem.eql(u8, value, "portable")) hash.backend.portable else hash.detect() else hash.detect();
     display.log("*", "target  {s}  |  {s}  |  {s}", .{ target, @tagName(opt.where), if (prepared.signed) "signed" else "unsigned" });
-    display.log("*", "{d} workers  |  {s} cpu  |  ctrl-c to stop", .{ opt.threads, @tagName(engine) });
     if (branch == null) display.log("*", "detached head. the winning commit will stay detached.", .{});
-    const result = try miner.mine(init.gpa, init.io, display, prepared.bytes, prepared.offset, prepared.signed, kind, pattern, opt.threads, engine);
+    const result = try miner.mine(init.gpa, init.io, display, prepared.bytes, prepared.offset, prepared.signed, kind, pattern, opt.threads, engine, opt.device);
     defer init.gpa.free(result.bytes);
     const winner = try g.input(&.{ "hash-object", "-t", "commit", "-w", "--stdin" }, result.bytes);
     var digest: [32]u8 = undefined;
