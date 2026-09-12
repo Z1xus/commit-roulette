@@ -5,6 +5,7 @@ const handle = opaque {};
 extern fn roulette_gpu_open(source: [*:0]const u8, tail: [*]const u8, blocks: u32, state: [*]const u32, digits: [*]const u8, nonce_at: u32, signed_nonce: u32, sha256: u32, length: u32, position: u32) ?*handle;
 extern fn roulette_gpu_close(g: *handle) void;
 extern fn roulette_gpu_batch(g: *handle, start: u64, count: u32, winner: *u32) c_int;
+extern fn roulette_gpu_batch_limit(g: *handle) u32;
 
 pub const session = struct {
     device: *handle,
@@ -33,5 +34,9 @@ pub const session = struct {
         if (winner == std.math.maxInt(u32)) return null;
         if (winner >= count) return error.GpuFailed;
         return start + winner;
+    }
+
+    pub fn batchLimit(self: session) u32 {
+        return roulette_gpu_batch_limit(self.device);
     }
 };

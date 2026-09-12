@@ -58,19 +58,22 @@ pub fn prepare(allocator: std.mem.Allocator, raw: []const u8) !template {
         // mutate only trailing armor whitespace. binary signature bytes stay identical.
         var at = std.mem.indexOfScalar(u8, block, '\n') orelse return error.InvalidCommit;
         at += 1;
+        var nonce_tail: ?usize = null;
+        var nonce_end: usize = 0;
         while (at < block.len) {
             const end = std.mem.indexOfScalarPos(u8, block, at, '\n') orelse return error.InvalidCommit;
             const line = std.mem.trim(u8, block[at..end], " \t\r");
             if (line.len > 0 and line[0] != '-' and line[0] != '=' and std.mem.indexOfScalar(u8, line, ':') == null) {
                 var tail = end;
                 while (tail > at and (block[tail - 1] == ' ' or block[tail - 1] == '\t' or block[tail - 1] == '\r')) tail -= 1;
-                const offset = f.start + tail;
-                const bytes = try std.mem.concat(allocator, u8, &.{ raw[0..offset], &(@as([64]u8, @splat(' '))), raw[f.start + end ..] });
-                return .{ .bytes = bytes, .offset = offset, .signed = true };
+                nonce_tail = tail;
+                nonce_end = end;
             }
             at = end + 1;
         }
-        return error.InvalidCommit;
+        const offset = f.start + (nonce_tail orelse return error.InvalidCommit);
+        const bytes = try std.mem.concat(allocator, u8, &.{ raw[0..offset], &(@as([64]u8, @splat(' '))), raw[f.start + nonce_end ..] });
+        return .{ .bytes = bytes, .offset = offset, .signed = true };
     }
     if (nonce) |f| {
         const value = std.mem.trimEnd(u8, raw[f.start + 9 .. f.end], "\n");

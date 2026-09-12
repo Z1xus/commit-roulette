@@ -89,7 +89,7 @@ const worker = struct {
 
 pub fn encode(bytes: []u8, value: u64, signed: bool) void {
     if (signed) {
-        for (0..64) |i| bytes[i] = if ((value >> @as(u6, @intCast(i))) & 1 == 0) ' ' else '\t';
+        for (0..64) |i| bytes[i] = if ((value >> @as(u6, @intCast(63 - i))) & 1 == 0) ' ' else '\t';
     } else {
         const digits = "0123456789abcdef";
         for (0..16) |i| bytes[i] = digits[(value >> @as(u6, @intCast((15 - i) * 4))) & 15];
@@ -154,7 +154,7 @@ fn mineGpu(allocator: std.mem.Allocator, io: std.Io, display: *ui, raw: []const 
         if (count == 0) return error.SearchExhausted;
         start += actual;
         const duration = batch_begin.untilNow(io, .awake).toNanoseconds();
-        if (duration < 25_000_000) batch_size = @min(batch_size * 2, 1_048_576);
+        if (duration < 25_000_000) batch_size = @min(batch_size * 2, session.batchLimit());
         if (duration > 100_000_000) batch_size = @max(batch_size / 2, 256);
     }
 }
