@@ -12,6 +12,7 @@ const help =
     \\  groll beef                roll the latest commit
     \\  groll commit beef [-m …]   commit staged files, then roll
     \\  groll undo                undo the last roll
+    \\  groll hooks --help        automatic rolls after local commits
     \\
     \\  --suffix / --contains     match end / anywhere, default: prefix
     \\  --sign / --no-sign        enable / disable signing
@@ -37,7 +38,8 @@ const options = struct {
 
 pub fn main(init: std.process.Init) void {
     var display: ui = .{ .io = init.io, .allocator = init.gpa };
-    execute(init, &display) catch |err| {
+    var automatic = false;
+    execute(init, &display, &automatic) catch |err| {
         display.clear();
         const message: []const u8 = switch (err) {
             error.Canceled => "roll canceled. the branch was not changed by mining.",
@@ -52,6 +54,9 @@ pub fn main(init: std.process.Init) void {
             error.InvalidArguments => "unknown command or option. run groll --help.",
             error.UnfinishedGitOperation => "finish or abort the current merge, rebase, or cherry-pick before rolling.",
             error.GitTooOld => "git 2.48 or newer is required for safe branch transactions.",
+            error.HookGitTooOld => "global hooks require git 2.54 or newer. normal rolls still support git 2.48.",
+            error.HookConfigExists => "hook.groll settings already exist. run groll hooks status. no settings were changed.",
+            error.HookConfigChanged => "hook.groll settings differ from the installed values. preserved them. inspect with groll hooks status.",
             error.GitFailed => "git stopped the operation. see its message above.",
             error.FileNotFound => "a required command or file is missing. check that git and your signing tool are available.",
             error.SignatureVerificationFailed => "signature verification failed. check git verify-commit and your signing trust settings. no winner was applied.",
@@ -72,6 +77,10 @@ pub fn main(init: std.process.Init) void {
             const n = @min(name.len, detail.len);
             for (name[0..n], 0..) |c, i| detail[i] = std.ascii.toLower(c);
             display.write("[-] detail: {s}\n", .{detail[0..n]});
+        }
+        if (automatic) {
+            display.write("[!] automatic roll stopped. git already created the commit.\n", .{});
+            return;
         }
         std.process.exit(if (err == error.Canceled) 130 else 1);
     };
@@ -144,10 +153,14 @@ fn parse(args: []const [:0]const u8) !options {
     return opt;
 }
 
-fn execute(init: std.process.Init, display: *ui) !void {
+fn execute(init: std.process.Init, display: *ui, automatic: *bool) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
-    var opt = try parse(args);
+    var opt = if (args.len > 1 and std.mem.eql(u8, args[1], "hooks")) hook: {
+        const target = (try @import("hooks.zig").execute(init, display, args[2..])) orelse return;
+        automatic.* = true;
+        break :hook try parse(&.{ args[0], "roll", target, "--no-animation" });
+    } else try parse(args);
     if (opt.help) return std.Io.File.stdout().writeStreamingAll(init.io, help);
     if (opt.version) return std.Io.File.stdout().writeStreamingAll(init.io, "groll " ++ version ++ "\n");
     const input_tty = try std.Io.File.stdin().isTty(init.io);

@@ -103,7 +103,7 @@ pub const git = struct {
 
     pub fn commit(self: git, message: ?[]const u8, sign: ?bool) !void {
         var args: std.ArrayList([]const u8) = .empty;
-        try args.append(self.allocator, "commit");
+        try args.appendSlice(self.allocator, &.{ "-c", "hook.groll.enabled=false", "commit" });
         if (self.display.quiet) try args.append(self.allocator, "--quiet");
         if (message) |m| try args.appendSlice(self.allocator, &.{ "-m", m });
         if (sign) |value| try args.append(self.allocator, if (value) "--gpg-sign" else "--no-gpg-sign");

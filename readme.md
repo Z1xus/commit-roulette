@@ -24,6 +24,19 @@ groll commit beef -m "fix parser"
 groll undo
 ```
 
+## automatic rolls
+
+requires git 2.54+
+
+```sh
+groll hooks install --global beef
+groll hooks status
+groll hooks uninstall --global
+```
+
+disable per repo: `git config --local hook.groll.enabled false`.
+for older git or a hook manager, use `groll hooks run beef` in the existing post-commit hook
+
 ## build
 
 requires zig 0.16.0 and git 2.48+. for signed commits you also need the selected signing tool
