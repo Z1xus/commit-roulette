@@ -11,17 +11,10 @@ pub const session = struct {
     device: *handle,
 
     pub fn init(allocator: std.mem.Allocator, base: hash.context, suffix: []const u8, signed: bool, digits: []const u8, position: u32) !session {
-        const length = std.math.add(usize, base.used, suffix.len) catch return error.GpuUnavailable;
-        if (length > 16 * 1024 * 1024) return error.GpuUnavailable;
-        const padded = std.mem.alignForward(usize, length + 9, 64);
-        const tail = try allocator.alloc(u8, padded);
+        if (suffix.len > 16 * 1024 * 1024) return error.GpuUnavailable;
+        const tail = try base.padded(allocator, suffix);
         defer allocator.free(tail);
-        @memset(tail, 0);
-        @memcpy(tail[0..base.used], base.buffer[0..base.used]);
-        @memcpy(tail[base.used..][0..suffix.len], suffix);
-        tail[length] = 0x80;
-        std.mem.writeInt(u64, tail[padded - 8 ..][0..8], (base.length + suffix.len) * 8, .big);
-        return .{ .device = roulette_gpu_open(@embedFile("gpu.cl"), tail.ptr, @intCast(padded / 64), &base.state, digits.ptr, @intCast(base.used), @intFromBool(signed), @intFromBool(base.kind == .sha256), @intCast(digits.len), position) orelse return error.GpuUnavailable };
+        return .{ .device = roulette_gpu_open(@embedFile("gpu.cl"), tail.ptr, @intCast(tail.len / 64), &base.state, digits.ptr, @intCast(base.used), @intFromBool(signed), @intFromBool(base.kind == .sha256), @intCast(digits.len), position) orelse return error.GpuUnavailable };
     }
 
     pub fn deinit(self: session) void {

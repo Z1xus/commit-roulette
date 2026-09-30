@@ -12,6 +12,35 @@ pub fn detect() backend {
     return if (roulette_accelerated() != 0) .accelerated else .portable;
 }
 
+pub fn compress(kind: algorithm, engine: backend, state: *[8]u32, data: []const u8) void {
+    if (engine == .accelerated) {
+        switch (builtin.cpu.arch) {
+            .x86_64 => switch (kind) {
+                .sha1 => sha1_process_x86(state, data.ptr, @intCast(data.len)),
+                .sha256 => sha256_process_x86(state, data.ptr, @intCast(data.len)),
+            },
+            .aarch64 => switch (kind) {
+                .sha1 => sha1_process_arm(state, data.ptr, @intCast(data.len)),
+                .sha256 => sha256_process_arm(state, data.ptr, @intCast(data.len)),
+            },
+            else => unreachable,
+        }
+    } else switch (kind) {
+        .sha1 => {
+            var h = std.crypto.hash.Sha1.init(.{});
+            h.s = state[0..5].*;
+            h.update(data);
+            state[0..5].* = h.s;
+        },
+        .sha256 => {
+            var h = std.crypto.hash.sha2.Sha256.init(.{});
+            h.s = state.*;
+            h.update(data);
+            state.* = h.s;
+        },
+    }
+}
+
 pub const context = struct {
     state: [8]u32,
     buffer: [64]u8 = undefined,
@@ -28,32 +57,7 @@ pub const context = struct {
     }
 
     fn blocks(self: *context, data: []const u8) void {
-        if (self.engine == .accelerated) {
-            switch (builtin.cpu.arch) {
-                .x86_64 => switch (self.kind) {
-                    .sha1 => sha1_process_x86(&self.state, data.ptr, @intCast(data.len)),
-                    .sha256 => sha256_process_x86(&self.state, data.ptr, @intCast(data.len)),
-                },
-                .aarch64 => switch (self.kind) {
-                    .sha1 => sha1_process_arm(&self.state, data.ptr, @intCast(data.len)),
-                    .sha256 => sha256_process_arm(&self.state, data.ptr, @intCast(data.len)),
-                },
-                else => unreachable,
-            }
-        } else switch (self.kind) {
-            .sha1 => {
-                var h = std.crypto.hash.Sha1.init(.{});
-                h.s = self.state[0..5].*;
-                h.update(data);
-                self.state[0..5].* = h.s;
-            },
-            .sha256 => {
-                var h = std.crypto.hash.sha2.Sha256.init(.{});
-                h.s = self.state;
-                h.update(data);
-                self.state = h.s;
-            },
-        }
+        compress(self.kind, self.engine, &self.state, data);
     }
 
     pub fn update(self: *context, bytes: []const u8) void {
@@ -75,6 +79,19 @@ pub const context = struct {
             @memcpy(self.buffer[0 .. data.len - n], data[n..]);
             self.used = data.len - n;
         }
+    }
+
+    // buffered bytes, suffix, and padding as whole blocks. hashing them from state gives the final state.
+    pub fn padded(self: context, allocator: std.mem.Allocator, suffix: []const u8) ![]u8 {
+        const length = self.used + suffix.len;
+        const size = std.mem.alignForward(usize, length + 9, 64);
+        const tail = try allocator.alloc(u8, size);
+        @memset(tail, 0);
+        @memcpy(tail[0..self.used], self.buffer[0..self.used]);
+        @memcpy(tail[self.used..][0..suffix.len], suffix);
+        tail[length] = 0x80;
+        std.mem.writeInt(u64, tail[size - 8 ..][0..8], (self.length + suffix.len) * 8, .big);
+        return tail;
     }
 
     pub fn final(self: *context) [32]u8 {

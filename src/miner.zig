@@ -39,6 +39,49 @@ pub const pattern = struct {
 };
 
 pub const result = struct { bytes: []u8, tries: u64, seconds: f64, engine: hash.backend };
+
+// masks and values over big-endian state words, one entry per match offset.
+const matcher = struct {
+    masks: [64][8]u32 = undefined,
+    values: [64][8]u32 = undefined,
+    first: [64]u8 = undefined,
+    last: [64]u8 = undefined,
+    count: usize,
+    fn init(target: pattern, kind: hash.algorithm) matcher {
+        const nibbles: usize = if (kind == .sha1) 40 else 64;
+        const end = nibbles - target.len;
+        const begin: usize = if (target.where == .suffix) end else 0;
+        const stop: usize = if (target.where == .contains) end else begin;
+        var out: matcher = .{ .count = stop - begin + 1 };
+        for (0..out.count) |k| {
+            out.masks[k] = @splat(0);
+            out.values[k] = @splat(0);
+            for (target.digits[0..target.len], 0..) |digit, i| {
+                const n = begin + k + i;
+                const shift: u5 = @intCast((7 - n % 8) * 4);
+                out.masks[k][n / 8] |= @as(u32, 15) << shift;
+                out.values[k][n / 8] |= @as(u32, digit) << shift;
+            }
+            out.first[k] = @intCast((begin + k) / 8);
+            out.last[k] = @intCast((begin + k + target.len - 1) / 8);
+        }
+        return out;
+    }
+    inline fn check(self: *const matcher, state: *const [8]u32) bool {
+        for (0..self.count) |k| {
+            var match = true;
+            for (self.first[k]..@as(usize, self.last[k]) + 1) |i| {
+                if (state[i] & self.masks[k][i] != self.values[k][i]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) return true;
+        }
+        return false;
+    }
+};
+
 const shared = struct {
     stop: std.atomic.Value(bool) = .init(false),
     found: std.atomic.Value(bool) = .init(false),
@@ -47,52 +90,68 @@ const shared = struct {
     finished: std.Io.Timestamp = .zero,
     io: std.Io,
     winner: []u8,
-    target: pattern,
+    raw: []const u8,
+    offset: usize,
+    signed: bool,
+    match: matcher,
+    state: [8]u32,
+    kind: hash.algorithm,
+    engine: hash.backend,
 };
 const worker = struct {
     common: *shared,
-    bytes: []u8,
-    offset: usize,
-    signed: bool,
+    // padded blocks from the block that holds the nonce to the end of the object.
+    tail: []u8,
+    at: usize,
     start: u64,
-    stride: u64,
-    prefix: hash.context,
+    end: u64,
     fn run(self: *worker) void {
         defer _ = self.common.active.fetchSub(1, .release);
+        const c = self.common;
+        const nonce = self.tail[self.at..];
         var counter = self.start;
-        var batch: u64 = 0;
-        while (!self.common.stop.load(.monotonic)) {
-            encode(self.bytes[self.offset..], counter, self.signed);
-            var h = self.prefix;
-            h.update(self.bytes[self.offset..]);
-            const digest = h.final();
-            batch += 1;
-            if (self.common.target.matches(digest[0..if (h.kind == .sha1) @as(usize, 20) else 32])) {
-                if (!self.common.found.swap(true, .acq_rel)) {
-                    @memcpy(self.common.winner, self.bytes);
-                    self.common.finished = std.Io.Clock.awake.now(self.common.io);
+        while (counter < self.end and !c.stop.load(.monotonic)) {
+            const stop = counter + @min(self.end - counter, 4096);
+            const first = counter;
+            while (counter < stop) : (counter += 1) {
+                encode(nonce, counter, c.signed);
+                var state = c.state;
+                hash.compress(c.kind, c.engine, &state, self.tail);
+                if (c.match.check(&state)) {
+                    if (!c.found.swap(true, .acq_rel)) {
+                        @memcpy(c.winner, c.raw);
+                        encode(c.winner[c.offset..], counter, c.signed);
+                        c.finished = std.Io.Clock.awake.now(c.io);
+                    }
+                    c.stop.store(true, .release);
+                    _ = c.tries.fetchAdd(counter - first + 1, .monotonic);
+                    return;
                 }
-                self.common.stop.store(true, .release);
-                break;
             }
-            if (batch == 2048) {
-                _ = self.common.tries.fetchAdd(batch, .monotonic);
-                batch = 0;
-            }
-            const next = @addWithOverflow(counter, self.stride);
-            if (next[1] != 0) break;
-            counter = next[0];
+            _ = c.tries.fetchAdd(counter - first, .monotonic);
         }
-        _ = self.common.tries.fetchAdd(batch, .monotonic);
     }
 };
 
+const hex_pairs = pairs: {
+    const digits = "0123456789abcdef";
+    var table: [256][2]u8 = undefined;
+    for (&table, 0..) |*pair, i| pair.* = .{ digits[i >> 4], digits[i & 15] };
+    break :pairs table;
+};
+const blank_bytes = blanks: {
+    @setEvalBranchQuota(4096);
+    var table: [256][8]u8 = undefined;
+    for (&table, 0..) |*row, i| {
+        for (row, 0..) |*c, bit| c.* = if ((i >> (7 - bit)) & 1 == 0) ' ' else '\t';
+    }
+    break :blanks table;
+};
+
 pub fn encode(bytes: []u8, value: u64, signed: bool) void {
-    if (signed) {
-        for (0..64) |i| bytes[i] = if ((value >> @as(u6, @intCast(63 - i))) & 1 == 0) ' ' else '\t';
-    } else {
-        const digits = "0123456789abcdef";
-        for (0..16) |i| bytes[i] = digits[(value >> @as(u6, @intCast((15 - i) * 4))) & 15];
+    for (0..8) |i| {
+        const byte: u8 = @truncate(value >> @as(u6, @intCast((7 - i) * 8)));
+        if (signed) bytes[i * 8 ..][0..8].* = blank_bytes[byte] else bytes[i * 2 ..][0..2].* = hex_pairs[byte];
     }
 }
 
@@ -167,7 +226,7 @@ fn mineCpu(allocator: std.mem.Allocator, io: std.Io, display: *ui, raw: []const 
     base.update(raw[0..offset]);
     const winner = try allocator.alloc(u8, raw.len);
     errdefer allocator.free(winner);
-    var common: shared = .{ .winner = winner, .target = target, .io = io };
+    var common: shared = .{ .winner = winner, .raw = raw, .offset = offset, .signed = signed, .match = .init(target, kind), .state = base.state, .kind = kind, .engine = engine, .io = io };
     const workers = try allocator.alloc(worker, threads);
     defer allocator.free(workers);
     const handles = try allocator.alloc(std.Thread, threads);
@@ -176,17 +235,19 @@ fn mineCpu(allocator: std.mem.Allocator, io: std.Io, display: *ui, raw: []const 
     defer {
         common.stop.store(true, .release);
         for (handles[0..started]) |handle| handle.join();
-        for (workers[0..started]) |w| allocator.free(w.bytes);
+        for (workers[0..started]) |w| allocator.free(w.tail);
         display.clear();
     }
     roulette_signals();
     const begin = std.Io.Clock.awake.now(io);
+    const chunk = std.math.maxInt(u64) / threads;
     for (workers, 0..) |*w, i| {
-        w.* = .{ .common = &common, .bytes = try allocator.dupe(u8, raw), .offset = offset, .signed = signed, .start = @intCast(i), .stride = @intCast(threads), .prefix = base };
+        const start = chunk * i;
+        w.* = .{ .common = &common, .tail = try base.padded(allocator, raw[offset..]), .at = base.used, .start = start, .end = if (i + 1 == threads) std.math.maxInt(u64) else start + chunk };
         _ = common.active.fetchAdd(1, .monotonic);
         handles[i] = std.Thread.spawn(.{}, worker.run, .{w}) catch |err| {
             _ = common.active.fetchSub(1, .monotonic);
-            allocator.free(w.bytes);
+            allocator.free(w.tail);
             return err;
         };
         started += 1;
