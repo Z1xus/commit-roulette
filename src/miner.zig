@@ -156,6 +156,7 @@ pub fn encode(bytes: []u8, value: u64, signed: bool) void {
 }
 
 pub fn mine(allocator: std.mem.Allocator, io: std.Io, display: *ui, raw: []const u8, offset: usize, signed: bool, kind: hash.algorithm, target: pattern, threads: usize, engine: hash.backend, selected: device) !result {
+    if (selected == .auto and quick(kind, target, threads, engine)) return mineCpu(allocator, io, display, raw, offset, signed, kind, target, threads, engine);
     if (selected != .cpu) {
         return mineGpu(allocator, io, display, raw, offset, signed, kind, target, engine) catch |err| {
             if (selected == .gpu or (err != error.GpuUnavailable and err != error.GpuFailed)) return err;
@@ -164,6 +165,16 @@ pub fn mine(allocator: std.mem.Allocator, io: std.Io, display: *ui, raw: []const
         };
     }
     return mineCpu(allocator, io, display, raw, offset, signed, kind, target, threads, engine);
+}
+
+// gpu setup costs about 0.4 s. use cpu workers when they should finish in about 0.25 s.
+fn quick(kind: hash.algorithm, target: pattern, threads: usize, engine: hash.backend) bool {
+    if (target.len > 12) return false;
+    const nibbles: u64 = if (kind == .sha1) 40 else 64;
+    const positions: u64 = if (target.where == .contains) nibbles - target.len + 1 else 1;
+    const expected = (@as(u64, 1) << @intCast(target.len * 4)) / positions;
+    const rate: u64 = if (engine == .accelerated) 20_000_000 else 6_000_000;
+    return expected <= threads * rate / 4;
 }
 
 fn mineGpu(allocator: std.mem.Allocator, io: std.Io, display: *ui, raw: []const u8, offset: usize, signed: bool, kind: hash.algorithm, target: pattern, engine: hash.backend) !result {
