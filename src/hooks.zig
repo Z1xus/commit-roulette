@@ -57,12 +57,11 @@ pub fn execute(init: std.process.Init, display: *ui, args: []const [:0]const u8)
     } else if (!std.mem.eql(u8, args[1], "--global")) return error.InvalidArguments;
     if (install) {
         try requireVersion(g);
-        for ([_][]const []const u8{
-            &.{ "--includes", "--get-regexp", "^hook\\.groll\\." },
-            &.{ "--global", "--includes", "--get-regexp", "^hook\\.groll\\." },
-        }) |query| {
-            if (try config(g, query) != null) return error.HookConfigExists;
+        const previous = try managed(g);
+        if (try config(g, &.{ "--includes", "--name-only", "--get-regexp", "^hook\\.groll\\." })) |names| {
+            if (previous == null or std.mem.count(u8, names, "\n") != 3) return error.HookConfigExists;
         }
+        if (previous) |command| try removeManaged(g, command);
         const exe = try std.process.executablePathAlloc(init.io, g.allocator);
         const command = try std.fmt.allocPrint(g.allocator, "{s} hooks run {s}", .{ try shellQuote(g.allocator, exe), target.? });
         _ = try g.checked(&.{ "config", "--global", "--add", owner_key, command });
@@ -72,17 +71,11 @@ pub fn execute(init: std.process.Init, display: *ui, args: []const [:0]const u8)
         _ = try g.checked(&.{ "config", "--global", "--add", event_key, "post-commit" });
         display.write("[+] global hook installed for prefix {s}\n[*] executable: {s}\n", .{ target.?, exe });
     } else {
-        const owner = try single(g, owner_key);
-        const command = try single(g, command_key);
-        const event = try single(g, event_key);
-        if (owner == null and command == null and event == null) {
+        const command = try managed(g) orelse {
             display.write("[*] no managed hook in the global config. included settings are left intact.\n", .{});
             return null;
-        }
-        if (owner == null or command == null or event == null or !std.mem.eql(u8, owner.?, command.?) or !std.mem.eql(u8, event.?, "post-commit")) return error.HookConfigChanged;
-        try remove(g, event_key, event.?);
-        try remove(g, command_key, command.?);
-        try remove(g, owner_key, owner.?);
+        };
+        try removeManaged(g, command);
         display.write("[+] global groll hook removed. other settings were preserved.\n", .{});
     }
     return null;
@@ -107,6 +100,21 @@ fn single(g: git, key: []const u8) !?[]const u8 {
     const value = (try config(g, &.{ "--global", "--no-includes", "--null", "--get-all", key })) orelse return null;
     if (value.len == 0 or value[value.len - 1] != 0 or std.mem.indexOfScalar(u8, value[0 .. value.len - 1], 0) != null) return error.HookConfigChanged;
     return value[0 .. value.len - 1];
+}
+
+fn managed(g: git) !?[]const u8 {
+    const owner = try single(g, owner_key);
+    const command = try single(g, command_key);
+    const event = try single(g, event_key);
+    if (owner == null and command == null and event == null) return null;
+    if (owner == null or command == null or event == null or !std.mem.eql(u8, owner.?, command.?) or !std.mem.eql(u8, event.?, "post-commit")) return error.HookConfigChanged;
+    return command;
+}
+
+fn removeManaged(g: git, command: []const u8) !void {
+    try remove(g, event_key, "post-commit");
+    try remove(g, command_key, command);
+    try remove(g, owner_key, command);
 }
 
 fn remove(g: git, key: []const u8, value: []const u8) !void {
